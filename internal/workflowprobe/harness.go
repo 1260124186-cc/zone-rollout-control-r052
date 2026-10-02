@@ -23,12 +23,13 @@ import (
 )
 
 type harness struct {
-	baseURL  string
-	clock    *platform.ManualClock
-	client   *http.Client
-	server   *http.Server
-	listener net.Listener
-	tempDir  string
+	baseURL   string
+	statePath string
+	clock     *platform.ManualClock
+	client    *http.Client
+	server    *http.Server
+	listener  net.Listener
+	tempDir   string
 }
 
 func newHarness() (*harness, error) {
@@ -36,12 +37,36 @@ func newHarness() (*harness, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create temporary directory: %w", err)
 	}
-	stateStore, err := store.Open(tempDir + "/state.json")
+	statePath := tempDir + "/state.json"
+	stateStore, err := store.Open(statePath)
 	if err != nil {
 		_ = os.RemoveAll(tempDir)
 		return nil, fmt.Errorf("open temporary store: %w", err)
 	}
 	clock := platform.NewManualClock(time.Date(2026, time.September, 25, 12, 0, 0, 0, time.UTC))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, fmt.Errorf("listen: %w", err)
+	}
+	server := newProbeServer(stateStore, clock, listener)
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	return &harness{
+		baseURL:   "http://" + listener.Addr().String(),
+		statePath: statePath,
+		clock:     clock,
+		client:    &http.Client{Timeout: 10 * time.Second},
+		server:    server,
+		listener:  listener,
+		tempDir:   tempDir,
+	}, nil
+}
+
+// newProbeServer wires the same services the real process starts so probes
+// exercise the production HTTP route and persistence stack.
+func newProbeServer(stateStore *store.Store, clock *platform.ManualClock, listener net.Listener) *http.Server {
 	ids := platform.CryptoIDGenerator{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	plans := plan.New(stateStore, clock, ids)
@@ -50,24 +75,33 @@ func newHarness() (*harness, error) {
 	probes := probe.New(stateStore, clock, ids, allocations)
 	assessments := assessment.New(stateStore, clock, ids)
 	api := httpapi.New(plans, nodes, allocations, probes, assessments, ids, logger)
+	return &http.Server{Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second}
+}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		_ = os.RemoveAll(tempDir)
-		return nil, fmt.Errorf("listen: %w", err)
+// restart shuts the HTTP stack down and reopens the snapshot from disk, exactly
+// like restarting the service process, then serves the same base URL again.
+func (h *harness) restart() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := h.server.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shutdown before restart: %w", err)
 	}
-	server := &http.Server{Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	_ = h.listener.Close()
+	stateStore, err := store.Open(h.statePath)
+	if err != nil {
+		return fmt.Errorf("reopen store: %w", err)
+	}
+	listener, err := net.Listen("tcp", h.listener.Addr().String())
+	if err != nil {
+		return fmt.Errorf("relisten: %w", err)
+	}
+	server := newProbeServer(stateStore, h.clock, listener)
 	go func() {
 		_ = server.Serve(listener)
 	}()
-	return &harness{
-		baseURL:  "http://" + listener.Addr().String(),
-		clock:    clock,
-		client:   &http.Client{Timeout: 10 * time.Second},
-		server:   server,
-		listener: listener,
-		tempDir:  tempDir,
-	}, nil
+	h.server = server
+	h.listener = listener
+	return nil
 }
 
 func (h *harness) close() {

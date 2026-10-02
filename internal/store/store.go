@@ -31,7 +31,6 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("decode snapshot: %w", err)
 		}
 		state = normalize(state)
-		reconcileObservationSerials(&state)
 	case errors.Is(err, os.ErrNotExist):
 		if err := replaceFile(path, state); err != nil {
 			return nil, fmt.Errorf("initialize snapshot: %w", err)
@@ -40,27 +39,6 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("read snapshot: %w", err)
 	}
 	return &Store{path: path, state: state}, nil
-}
-
-// reconcileObservationSerials records every persisted observation against the
-// rollout serial pinned by its plan so that a restarted service evaluates the
-// same rollout identity it used before the restart.
-func reconcileObservationSerials(state *domain.State) {
-	pins := make(map[string]domain.RolloutPin, len(state.Plans))
-	for planID := range state.Plans {
-		pin, ok := domain.RolloutPinFromState(state, planID)
-		if !ok {
-			continue
-		}
-		pins[planID] = pin
-	}
-	for probeID, probe := range state.Probes {
-		pin, ok := pins[probe.PlanID]
-		if !ok {
-			continue
-		}
-		state.Probes[probeID] = pin.AlignedProbe(probe)
-	}
 }
 
 func (s *Store) Path() string {
