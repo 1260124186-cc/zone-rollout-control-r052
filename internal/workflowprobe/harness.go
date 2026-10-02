@@ -78,6 +78,45 @@ func (h *harness) close() {
 	_ = os.RemoveAll(h.tempDir)
 }
 
+// restart shuts down the HTTP service and reopens the same snapshot with a
+// fresh process-wide state, simulating a service restart that replays the
+// persisted JSON file.
+func (h *harness) restart() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := h.server.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shutdown server: %w", err)
+	}
+	_ = h.listener.Close()
+
+	stateStore, err := store.Open(h.tempDir + "/state.json")
+	if err != nil {
+		return fmt.Errorf("reopen store: %w", err)
+	}
+	ids := platform.CryptoIDGenerator{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	plans := plan.New(stateStore, h.clock, ids)
+	nodes := fleet.New(stateStore, h.clock, ids)
+	allocations := allocation.New(stateStore, h.clock, ids)
+	probes := probe.New(stateStore, h.clock, ids, allocations)
+	assessments := assessment.New(stateStore, h.clock, ids)
+	api := httpapi.New(plans, nodes, allocations, probes, assessments, ids, logger)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	server := &http.Server{Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	h.client = &http.Client{Timeout: 10 * time.Second}
+	h.server = server
+	h.listener = listener
+	h.baseURL = "http://" + listener.Addr().String()
+	return nil
+}
+
 func (h *harness) call(method string, path string, requestBody any, target any) error {
 	var payload []byte
 	var err error

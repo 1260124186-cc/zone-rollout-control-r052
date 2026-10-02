@@ -68,8 +68,9 @@ func ProbeFingerprint(leaseID string, input ProbeInput) string {
 }
 
 // RolloutPin is the zone serial identity a rollout is expected to converge on.
-// It is derived from the immutable revision a plan has pinned and is used
-// whenever observations reported by the fleet are reconciled with that rollout.
+// It is derived from the immutable revision a plan has pinned and is used to
+// compare observations reported by the fleet against that rollout; reported
+// serials are always stored verbatim and never rewritten to the pin.
 type RolloutPin struct {
 	PlanID   string
 	Revision string
@@ -85,32 +86,9 @@ func NewRolloutPin(plan RolloutPlan, revision ZoneRevision) RolloutPin {
 	}
 }
 
-// Aligned maps an observation onto the rollout identity pinned for the plan so
-// that every observation belonging to the same rollout shares one serial.
-func (pin RolloutPin) Aligned(observed uint32) uint32 {
-	if pin.Serial == 0 {
-		return observed
-	}
-	return pin.Serial
-}
-
 // Matches reports whether an observation belongs to this pinned rollout.
 func (pin RolloutPin) Matches(observed uint32) bool {
 	return observed == pin.Serial
-}
-
-// SerialDrift reports how far an observation sits from the pinned serial.
-func (pin RolloutPin) SerialDrift(observed uint32) uint32 {
-	if observed >= pin.Serial {
-		return observed - pin.Serial
-	}
-	return pin.Serial - observed
-}
-
-// AlignedProbe returns the observation stamped with this rollout identity.
-func (pin RolloutPin) AlignedProbe(probe Probe) Probe {
-	probe.ObservedSerial = pin.Aligned(probe.ObservedSerial)
-	return probe
 }
 
 // RolloutPinFromState resolves the rollout identity a plan currently pins.
@@ -149,7 +127,7 @@ func BuildAssessment(
 		}
 		if probe.Success {
 			successCount++
-			if !pin.Matches(pin.Aligned(probe.ObservedSerial)) {
+			if !pin.Matches(probe.ObservedSerial) {
 				reasons["serial_mismatch"] = struct{}{}
 			}
 		}

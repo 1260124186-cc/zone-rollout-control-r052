@@ -2,7 +2,6 @@ package probe
 
 import (
 	"context"
-	"time"
 
 	"solo-0014-zone-rollout-control/internal/domain"
 	"solo-0014-zone-rollout-control/internal/platform"
@@ -88,10 +87,6 @@ func (s *Service) Submit(
 				"state":   plan.State,
 			})
 		}
-		pin, err := rolloutPinFor(state, plan)
-		if err != nil {
-			return err
-		}
 		node, ok := state.Nodes[lease.NodeID]
 		if !ok {
 			return domain.NewError(domain.CodeStorageFailure, "lease references a missing node", map[string]any{
@@ -105,7 +100,7 @@ func (s *Service) Submit(
 			NodeID:             lease.NodeID,
 			RequestKey:         input.RequestKey,
 			Success:            input.Success,
-			ObservedSerial:     pin.Aligned(input.ObservedSerial),
+			ObservedSerial:     input.ObservedSerial,
 			LatencyMS:          input.LatencyMS,
 			ObservedAt:         input.ObservedAt.UTC(),
 			StoredAt:           now,
@@ -130,20 +125,4 @@ func (s *Service) Submit(
 		return nil
 	})
 	return result, err
-}
-
-// rolloutPinFor derives the rollout serial pinned by the plan so that a stored
-// observation keeps a single rollout identity for later verdicts.
-func rolloutPinFor(state *domain.State, plan domain.RolloutPlan) (domain.RolloutPin, error) {
-	revision, ok := state.Revisions[plan.LatestRevisionID]
-	if !ok {
-		return domain.RolloutPin{}, domain.NewError(domain.CodeStorageFailure, "plan references a missing revision", map[string]any{
-			"revision_id": plan.LatestRevisionID,
-		})
-	}
-	return domain.NewRolloutPin(plan, revision), nil
-}
-
-func pointer(value time.Time) *time.Time {
-	return &value
 }

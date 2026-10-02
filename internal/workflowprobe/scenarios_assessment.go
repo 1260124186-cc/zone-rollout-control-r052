@@ -61,7 +61,7 @@ func runConsistencyAssessment() error {
 		return ensure(false, "latest assessment does not match")
 	}
 
-	reviewPlan, reviewRevision, err := createActivePlan(harness, "review.example", 4001, 1, 1, 20)
+	reviewPlan, reviewRevision, err := createActivePlan(harness, "review.example", 4001, 1, 1, 40)
 	if err != nil {
 		return err
 	}
@@ -69,15 +69,21 @@ func runConsistencyAssessment() error {
 	if err != nil {
 		return err
 	}
-	if _, err := submitProbe(
+	mismatched, err := submitProbe(
 		harness,
 		reviewGroup.LeaseIDs[0],
 		"review-probe-0001",
 		true,
 		reviewRevision.Serial+1,
 		30,
-	); err != nil {
+	)
+	if err != nil {
 		return err
+	}
+	// The observation must be accepted and stored with the serial the node
+	// actually reported, even though it disagrees with the locked revision.
+	if mismatched.ObservedSerial != reviewRevision.Serial+1 {
+		return ensure(false, "reported serial was not preserved on the stored probe")
 	}
 	var review domain.RolloutAssessment
 	if err := harness.call(http.MethodPatch, "/v1/plans/"+reviewPlan.ID+"/assessments", domain.AssessmentInput{
@@ -87,6 +93,45 @@ func runConsistencyAssessment() error {
 	}
 	if review.Verdict != domain.VerdictReviewRequired {
 		return ensure(false, "mismatched serial did not require review")
+	}
+	if len(review.Reasons) != 1 || review.Reasons[0] != "serial_mismatch" {
+		return ensure(false, fmt.Sprintf("expected only serial_mismatch, got %v", review.Reasons))
+	}
+	// Replaying the same assessment request must return the identical verdict.
+	var reviewReplay domain.RolloutAssessment
+	if err := harness.call(http.MethodPatch, "/v1/plans/"+reviewPlan.ID+"/assessments", domain.AssessmentInput{
+		RequestKey: "review-request-0001",
+	}, &reviewReplay); err != nil {
+		return err
+	}
+	if reviewReplay.ID != review.ID ||
+		reviewReplay.Verdict != review.Verdict ||
+		len(reviewReplay.Reasons) != 1 || reviewReplay.Reasons[0] != "serial_mismatch" {
+		return ensure(false, "assessment replay returned a different verdict")
+	}
+	// A service restart must keep both the raw reported serial and the verdict:
+	// re-evaluating with a fresh request key reaches the same conclusion.
+	if err := harness.restart(); err != nil {
+		return err
+	}
+	var restartedLatest domain.RolloutAssessment
+	if err := harness.call(http.MethodGet, "/v1/plans/"+reviewPlan.ID+"/assessments/latest", nil, &restartedLatest); err != nil {
+		return err
+	}
+	if restartedLatest.ID != review.ID ||
+		restartedLatest.Verdict != domain.VerdictReviewRequired ||
+		len(restartedLatest.Reasons) != 1 || restartedLatest.Reasons[0] != "serial_mismatch" {
+		return ensure(false, "restart changed the stored assessment verdict")
+	}
+	var restartedReview domain.RolloutAssessment
+	if err := harness.call(http.MethodPatch, "/v1/plans/"+reviewPlan.ID+"/assessments", domain.AssessmentInput{
+		RequestKey: "review-request-0002",
+	}, &restartedReview); err != nil {
+		return err
+	}
+	if restartedReview.Verdict != domain.VerdictReviewRequired ||
+		len(restartedReview.Reasons) != 1 || restartedReview.Reasons[0] != "serial_mismatch" {
+		return ensure(false, "post-restart reassessment did not flag the serial mismatch")
 	}
 	return nil
 }
